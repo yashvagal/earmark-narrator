@@ -1,0 +1,12 @@
+{
+  "name": "earmark-runner",
+  "private": true,
+  "type": "module",
+  "description": "Cloud narrator for Earmark, run by .github/workflows/narrate.yml in yashvagal/earmark-narrator on GitHub's free runners.",
+  "scripts": { "start": "tsx narrate.ts" },
+  "dependencies": {
+    "@breezystack/lamejs": "1.2.7",
+    "kokoro-js": "1.2.1",
+    "tsx": "4.19.2"
+  }
+}

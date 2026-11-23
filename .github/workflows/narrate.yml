@@ -1,0 +1,58 @@
+# Cloud narration for Earmark: claims chapters queued in the app and reads them aloud with Kokoro on this runner's
+# CPU, then uploads the MP3. It proves who it is to the Worker with GitHub's OIDC token, so no secrets live here.
+# This repo is public on purpose (public repos get GitHub-hosted runner minutes free); books, text and audio never
+# touch it and logs print no titles or text. The app starts it the moment a book is queued (Worker secret
+# GITHUB_DISPATCH_TOKEN); the schedule every 6 hours is only a backup.
+name: narrate
+on:
+  schedule:
+    - cron: "7 */6 * * *"
+  workflow_dispatch: {}
+permissions:
+  id-token: write
+  contents: read
+concurrency:
+  group: narrate
+  cancel-in-progress: false
+jobs:
+  narrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Start the clock
+        run: echo "EARMARK_T0=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Anything queued?
+        id: peek
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://listen.studiko.app/runner/queued)
+          echo "status=$code" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.peek.outputs.status == '200'
+      - uses: actions/setup-node@v4
+        if: steps.peek.outputs.status == '200'
+        with:
+          node-version: 22
+      - name: Voice model cache
+        if: steps.peek.outputs.status == '200'
+        uses: actions/cache@v4
+        with:
+          path: node_modules/@huggingface/transformers/.cache
+          key: kokoro-82m-v1-q8
+      - name: Install
+        if: steps.peek.outputs.status == '200'
+        # The CPU build of onnxruntime ships inside the package; its install script only fetches GPU extras.
+        run: npm install --no-audit --no-fund --ignore-scripts
+      - name: Narrate
+        if: steps.peek.outputs.status == '200'
+        env:
+          STOP_AFTER_MIN: "300"
+        run: npx tsx narrate.ts
+      # Feeds the monthly tracker in Settings: GitHub bills each job rounded up to a whole minute, empty runs included.
+      # Sends only a number of seconds; 15 s covers runner start-up before the first step.
+      - name: Report minutes used
+        if: always()
+        run: |
+          secs=$(( $(date +%s) - ${EARMARK_T0:-$(date +%s)} + 15 ))
+          tok=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=earmark-runner" | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+          curl -s -o /dev/null -w "usage report: %{http_code}\n" -X POST -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+            --data "{\"seconds\":$secs}" https://listen.studiko.app/runner/usage || true
