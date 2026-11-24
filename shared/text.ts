@@ -61,7 +61,8 @@ function hardSplit(sentence: string, max: number): string[] {
  * Turns chapter text into chunks short enough for Kokoro (it truncates past about 510 phonemes),
  * grouping short sentences so the voice keeps a natural flow.
  */
-export function chunkForSpeech(text: string, max = 320): SpeechChunk[] {
+// Kokoro reads best in sentence-sized pieces; long ones can turn breathy or rushed toward the end.
+export function chunkForSpeech(text: string, max = 260): SpeechChunk[] {
   const chunks: SpeechChunk[] = [];
   const paragraphs = normalizeText(text).split(/\n\s*\n|\n/).map((p) => p.trim()).filter(Boolean);
   for (const para of paragraphs) {
