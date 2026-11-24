@@ -2,8 +2,8 @@
 # CPU, then uploads the MP3. It proves who it is to the Worker with GitHub's OIDC token, so no secrets live here.
 # This repo is public on purpose (public repos get GitHub-hosted runner minutes free); books, text and audio never
 # touch it and logs print no titles or text. The app starts it the moment a book is queued (Worker secret
-# GITHUB_DISPATCH_TOKEN); the schedule every 6 hours is only a backup. Each run starts up to 8 runners with
-# 3 narrators each; the Worker hands every chapter to exactly one of them.
+# GITHUB_DISPATCH_TOKEN); the schedule every 6 hours is only a backup. Each run starts up to 10 runners with
+# 2 narrators each; the Worker hands every chapter to exactly one of them.
 name: narrate
 on:
   schedule:
@@ -13,7 +13,7 @@ permissions:
   id-token: write
   contents: read
 jobs:
-  # Sizes the run: one runner per 3 queued chapters, up to 8 (public repos get these minutes free, 20 jobs at once).
+  # Sizes the run: one runner per 2 queued chapters, up to 10 (public repos get these minutes free, 20 jobs at once).
   plan:
     runs-on: ubuntu-latest
     outputs:
@@ -25,7 +25,7 @@ jobs:
           n=$(printf '%s\n' "$h" | sed -n 's/^x-queued: *//Ip' | head -1)
           # An older Worker answers 200 without the count: still start one runner.
           if [ -z "$n" ]; then printf '%s\n' "$h" | head -1 | grep -q ' 200' && n=1 || n=0; fi
-          r=$(( (n + 2) / 3 )); [ "$r" -gt 8 ] && r=8
+          r=$(( (n + 1) / 2 )); [ "$r" -gt 10 ] && r=10
           echo "queued $n, runners $r"
           echo "runners=$(seq -s, 1 $r | sed 's/^/[/;s/$/]/;s/^\[\]$/[]/')" >> "$GITHUB_OUTPUT"
   narrate:
@@ -59,16 +59,16 @@ jobs:
         if: steps.deps.outputs.cache-hit != 'true'
         # The CPU build of onnxruntime ships inside the package; its install script only fetches GPU extras.
         run: npm install --no-audit --no-fund --ignore-scripts
-      # Loads (and on a cold cache downloads) the voice once, so the three narrators below don't race to fetch it.
+      # Loads (and on a cold cache downloads) the voice once, so the narrators below don't race to fetch it.
       - name: Warm the voice
         run: |
           node --input-type=module -e "const { KokoroTTS } = await import('kokoro-js'); await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', { dtype: 'fp32', device: 'cpu' }); console.log('voice ready')"
       - name: Narrate
         env:
           STOP_AFTER_MIN: "300"
-        # Three narrators per runner: the voice engine barely uses a second core on its own, and the runner has four.
+        # Two narrators per runner: each mostly uses one core, and on four cores two keep their own speed (three slowed each chapter).
         run: |
-          for i in 1 2 3; do npx tsx narrate.ts & sleep 2; done
+          for i in 1 2; do npx tsx narrate.ts & sleep 2; done
           fail=0; for job in $(jobs -p); do wait "$job" || fail=1; done; exit $fail
       # Feeds the monthly tracker in Settings: GitHub bills each job rounded up to a whole minute, empty runs included.
       # Sends only a number of seconds; 15 s covers runner start-up before the first step.
