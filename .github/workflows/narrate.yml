@@ -2,8 +2,8 @@
 # CPU, then uploads the MP3. It proves who it is to the Worker with GitHub's OIDC token, so no secrets live here.
 # This repo is public on purpose (public repos get GitHub-hosted runner minutes free); books, text and audio never
 # touch it and logs print no titles or text. The app starts it the moment a book is queued (Worker secret
-# GITHUB_DISPATCH_TOKEN); the schedule every 6 hours is only a backup. Each run starts up to 10 runners with
-# 2 narrators each; the Worker hands every chapter to exactly one of them.
+# GITHUB_DISPATCH_TOKEN); the schedule every 6 hours is only a backup. Each run starts one runner per queued chapter,
+# up to 16, with one narrator each; the Worker hands every chapter to exactly one of them.
 name: narrate
 on:
   schedule:
@@ -13,7 +13,8 @@ permissions:
   id-token: write
   contents: read
 jobs:
-  # Sizes the run: one runner per 2 queued chapters, up to 10 (public repos get these minutes free, 20 jobs at once).
+  # Sizes the run: one runner per queued chapter, up to 16 (public repos get these minutes free; the account runs
+  # 20 jobs at once, so 16 leaves room for other repos' checks). Past 16, each narrator claims the next chapter.
   plan:
     runs-on: ubuntu-latest
     outputs:
@@ -25,7 +26,7 @@ jobs:
           n=$(printf '%s\n' "$h" | sed -n 's/^x-queued: *//Ip' | head -1)
           # An older Worker answers 200 without the count: still start one runner.
           if [ -z "$n" ]; then printf '%s\n' "$h" | head -1 | grep -q ' 200' && n=1 || n=0; fi
-          r=$(( (n + 1) / 2 )); [ "$r" -gt 10 ] && r=10
+          r=$n; [ "$r" -gt 16 ] && r=16
           echo "queued $n, runners $r"
           echo "runners=$(seq -s, 1 $r | sed 's/^/[/;s/$/]/;s/^\[\]$/[]/')" >> "$GITHUB_OUTPUT"
   narrate:
@@ -66,10 +67,9 @@ jobs:
       - name: Narrate
         env:
           STOP_AFTER_MIN: "300"
-        # Two narrators per runner: each mostly uses one core, and on four cores two keep their own speed (three slowed each chapter).
-        run: |
-          for i in 1 2; do npx tsx narrate.ts & sleep 2; done
-          fail=0; for job in $(jobs -p); do wait "$job" || fail=1; done; exit $fail
+        # One narrator per runner. On a real 16-chapter book (Nov 25), two long chapters sharing a runner each read at
+        # about 1-1.7x real time, while a long chapter with the runner to itself read at about 3x.
+        run: npx tsx narrate.ts
       # Feeds the monthly tracker in Settings: GitHub bills each job rounded up to a whole minute, empty runs included.
       # Sends only a number of seconds; 15 s covers runner start-up before the first step.
       - name: Report minutes used
