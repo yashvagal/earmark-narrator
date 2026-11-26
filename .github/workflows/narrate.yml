@@ -3,7 +3,8 @@
 # This repo is public on purpose (public repos get GitHub-hosted runner minutes free); books, text and audio never
 # touch it and logs print no titles or text. The app starts it the moment a book is queued (Worker secret
 # GITHUB_DISPATCH_TOKEN); the schedule every 6 hours is only a backup. Each run starts one runner per queued chapter,
-# up to 16, with one narrator each; the Worker hands every chapter to exactly one of them.
+# up to 16, with one narrator each; the Worker hands every chapter to exactly one of them. Chapters read in the owner's
+# own cloned voice (clone.py) come in parts and take the runners left over; the voice sample never touches this repo.
 name: narrate
 on:
   schedule:
@@ -19,16 +20,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       runners: ${{ steps.count.outputs.runners }}
+      clone_runners: ${{ steps.count.outputs.clone_runners }}
     steps:
       - id: count
         run: |
           h=$(curl -s -o /dev/null -D - https://listen.studiko.app/runner/queued | tr -d '\r')
           n=$(printf '%s\n' "$h" | sed -n 's/^x-queued: *//Ip' | head -1)
+          m=$(printf '%s\n' "$h" | sed -n 's/^x-clone-queued: *//Ip' | head -1); m=${m:-0}
           # An older Worker answers 200 without the count: still start one runner.
           if [ -z "$n" ]; then printf '%s\n' "$h" | head -1 | grep -q ' 200' && n=1 || n=0; fi
           r=$n; [ "$r" -gt 16 ] && r=16
-          echo "queued $n, runners $r"
+          # Own-voice parts get the runners the regular voice leaves free; the Worker starts another run once it is done.
+          c=$m; [ "$c" -gt $(( 16 - r )) ] && c=$(( 16 - r ))
+          echo "queued $n, runners $r; own-voice parts $m, runners $c"
           echo "runners=$(seq -s, 1 $r | sed 's/^/[/;s/$/]/;s/^\[\]$/[]/')" >> "$GITHUB_OUTPUT"
+          echo "clone_runners=$(seq -s, 1 $c | sed 's/^/[/;s/$/]/;s/^\[\]$/[]/')" >> "$GITHUB_OUTPUT"
   narrate:
     needs: plan
     if: needs.plan.outputs.runners != '[]' && needs.plan.outputs.runners != ''
@@ -72,6 +78,57 @@ jobs:
         run: npx tsx narrate.ts
       # Feeds the monthly tracker in Settings: GitHub bills each job rounded up to a whole minute, empty runs included.
       # Sends only a number of seconds; 15 s covers runner start-up before the first step.
+      - name: Report minutes used
+        if: always()
+        run: |
+          secs=$(( $(date +%s) - ${EARMARK_T0:-$(date +%s)} + 15 ))
+          tok=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=earmark-runner" | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+          curl -s -o /dev/null -w "usage report: %{http_code}\n" -X POST -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+            --data "{\"seconds\":$secs}" https://listen.studiko.app/runner/usage || true
+  # The owner's own cloned voice (Qwen3-TTS on CPU, about a fifth of real time): one part of a chapter at a time.
+  clone:
+    needs: plan
+    if: needs.plan.outputs.clone_runners != '[]' && needs.plan.outputs.clone_runners != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(needs.plan.outputs.clone_runners) }}
+    steps:
+      - name: Start the clock
+        run: echo "EARMARK_T0=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installed packages cache
+        id: venv
+        uses: actions/cache@v4
+        with:
+          path: ~/clone-venv
+          key: clone-venv-py312-${{ hashFiles('requirements-clone.txt') }}
+      # Models only (Qwen3-TTS and the AudioSeal watermark); the voice sample is never written to disk.
+      - name: Voice model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/audioseal
+          key: qwen3-tts-0.6b-base-audioseal-v1
+      - name: Install
+        if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv ~/clone-venv
+          ~/clone-venv/bin/pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch==2.8.0 torchaudio==2.8.0
+          ~/clone-venv/bin/pip install --quiet -r requirements-clone.txt
+      - name: Narrate in the owner's voice
+        env:
+          STOP_AFTER_MIN: "200"
+          PYTHONWARNINGS: ignore
+          TRANSFORMERS_VERBOSITY: error
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: ~/clone-venv/bin/python -I clone.py
       - name: Report minutes used
         if: always()
         run: |

@@ -1,0 +1,7 @@
+# Own-voice narrator (clone.py). torch and torchaudio come from PyTorch's CPU index first (see the workflow).
+torch==2.8.0
+torchaudio==2.8.0
+qwen-tts==0.1.1
+soundfile==0.13.1
+audioseal==0.2.1
+numpy<2.4
