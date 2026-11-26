@@ -1,0 +1,37 @@
+# One-off speed test (Nov 26): can a free public runner read with a cloned voice (Qwen3-TTS 0.6B) fast enough
+# for Earmark? Uses a stand-in Kokoro reference voice and made-up sentences; prints timings only.
+# Runs only on pushes to this test branch; narrate.yml and main are untouched.
+name: speedtest-clone
+on:
+  push:
+    branches: [speedtest/qwen-clone]
+permissions:
+  contents: read
+jobs:
+  speed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install narrator packages
+        run: npm install --no-audit --no-fund --ignore-scripts
+      - name: Stand-in reference clip (Kokoro voice)
+        run: node speedtest/ref.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Qwen3-TTS (CPU)
+        run: |
+          sudo apt-get install -y -qq sox libsndfile1 > /dev/null
+          pip install -q torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q qwen-tts==0.1.1 soundfile==0.13.1 "numpy<2.4" --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Download the model
+        run: python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base'); snapshot_download('Qwen/Qwen3-TTS-Tokenizer-12Hz')" || true
+      - name: Speed, all cores, fp32
+        run: python speedtest/clone_speed.py 4 fp32
+      - name: Speed, all cores, bf16
+        if: always()
+        run: python speedtest/clone_speed.py 4 bf16
