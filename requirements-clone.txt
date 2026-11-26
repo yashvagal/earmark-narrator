@@ -5,3 +5,4 @@ qwen-tts==0.1.1
 soundfile==0.13.1
 audioseal==0.2.1
 numpy<2.4
+lameenc==1.8.1

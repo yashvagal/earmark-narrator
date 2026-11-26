@@ -1,7 +1,7 @@
 # Earmark cloud narrator, own-voice path. Reads chapter parts in the app owner's cloned voice with Qwen3-TTS 0.6B Base
 # (Apache-2.0) on the runner's CPU, watermarks the audio (AudioSeal, MIT) and uploads headerless MP3 frames that the
 # Worker joins into the chapter. On CPU this runs at roughly a fifth of real time, which is why chapters come in parts.
-# Auth is GitHub's OIDC token. The voice sample is fetched from the Worker while a part is being read and lives only in
+# MP3 via LAME (lameenc, LGPL, unmodified). Auth is GitHub's OIDC token. The voice sample is fetched from the Worker while a part is being read and lives only in
 # this process's memory; it is never written to disk, the cache or the log. Logs never print book text or titles.
 import base64
 import hashlib
@@ -9,9 +9,7 @@ import io
 import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 
@@ -174,19 +172,20 @@ class Reader:
 
 
 def to_mp3(audio, sr: int) -> tuple[bytes, float]:
-    """Constant-bitrate MP3 with no ID3 or Xing header, so the Worker can join parts by concatenation."""
-    import soundfile as sf
+    """Constant-bitrate MP3 frames with no ID3 or Xing header, so the Worker can join parts by concatenation."""
+    import lameenc
+    import numpy as np
 
-    with tempfile.TemporaryDirectory() as d:
-        src, dst = os.path.join(d, "in.wav"), os.path.join(d, "out.mp3")
-        sf.write(src, audio, sr, subtype="FLOAT")
-        subprocess.run(
-            ["ffmpeg", "-loglevel", "error", "-y", "-i", src, "-ac", "1", "-ar", str(OUT_SR), "-c:a", "libmp3lame", "-b:a", f"{MP3_KBPS}k",
-             "-write_xing", "0", "-id3v2_version", "0", "-write_id3v1", "0", "-map_metadata", "-1", "-f", "mp3", dst],
-            check=True,
-        )
-        with open(dst, "rb") as f:
-            mp3 = f.read()
+    if sr != OUT_SR:
+        n = int(len(audio) * OUT_SR / sr)
+        audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype("float32")
+    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+    enc = lameenc.Encoder()
+    enc.set_bit_rate(MP3_KBPS)
+    enc.set_in_sample_rate(OUT_SR)
+    enc.set_channels(1)
+    enc.set_quality(2)
+    mp3 = bytes(enc.encode(pcm) + enc.flush())
     return mp3, len(mp3) * 8 / (MP3_KBPS * 1000)
 
 
@@ -208,7 +207,15 @@ def main() -> int:
             reader = reader or Reader()
             audio, sr = reader.read(part["text"], part["voiceId"], part["mark"])
             mp3, duration = to_mp3(audio, sr)
-            status, _ = call(f"/runner/clone/parts/{part['id']}/audio?duration={duration:.2f}", "PUT", mp3, "audio/mpeg")
+            # The reading took most of an hour, so a brief network or Worker hiccup gets a few more tries.
+            for wait in (0, 15, 60):
+                time.sleep(wait)
+                try:
+                    status, _ = call(f"/runner/clone/parts/{part['id']}/audio?duration={duration:.2f}", "PUT", mp3, "audio/mpeg")
+                except Exception:
+                    status = 0
+                if status == 200 or 400 <= status < 500:
+                    break
             if status != 200:
                 raise RuntimeError(f"upload failed: {status}")
             done += 1
